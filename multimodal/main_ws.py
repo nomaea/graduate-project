@@ -3,17 +3,18 @@ import asyncio
 import json
 from datetime import datetime, timezone, timedelta
 
+import cv2
 import websockets
 
-from mock.fer_mock import MockFerSource
-from mock.sensor_mock import MockSensorSource
+from real_fer_source import RealFerSource
+from real_sensor_source import RealSensorSource
 from multimodal_engine import MultiModalEngine
 from json_builder import fusion_result_to_json
 
 
-# ---------- 1) 멀티모달 엔진 초기화 (전역에서 한 번만) ----------
-fer_src = MockFerSource()
-sensor_src = MockSensorSource()
+# ---------- 1) 멀티모달 엔진 & 소스 초기화 (전역에서 한 번만) ----------
+fer_src = RealFerSource()
+sensor_src = RealSensorSource()
 
 engine = MultiModalEngine(
     fer_source=fer_src,
@@ -24,6 +25,22 @@ engine = MultiModalEngine(
 )
 
 kst = timezone(timedelta(hours=9))
+
+# 센서 쪽도 main.py와 동일하게 샘플 payload 한 번 넣어둠 (동작 확인용)
+sample_payload = {
+    "timestamp": datetime.now(timezone.utc).isoformat(),
+    "user_id": "demo-user",
+    "hr_series": [88, 92, 95, 97, 93],
+    "eda_series": [0.18, 0.21, 0.20, 0.19],
+    "acc_series": [0.03, 0.05, 0.04],
+}
+sensor_src.update_window(sample_payload)
+
+# 웹캠 전역 오픈
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("[WARN] 웹캠을 열 수 없습니다. FER는 항상 None일 수 있습니다.")
+    cap = None
 
 
 # ---------- 2) 클라이언트 하나당 실행되는 루프 ----------
@@ -36,32 +53,39 @@ async def send_loop(websocket):
 
     try:
         while True:
-            # 멀티모달 한 스텝 수행
+            # 1) FER 업데이트 (웹캠 프레임 기반)
+            if cap is not None:
+                ret, frame = cap.read()
+                if ret:
+                    fer_src.update_frame(frame)
+                else:
+                    print("[WARN] 프레임 읽기 실패 (FER 업데이트 생략)")
+
+            # 2) 멀티모달 한 스텝 수행
             result = engine.step()
 
             if result is not None:
                 # FusionResult -> JSON 문자열
                 js = fusion_result_to_json(result)
 
-                # WebSocket으로 JSON 전송
+                # 클라이언트에 전송
                 await websocket.send(js)
 
-                # 서버 로그용 보기 좋은 출력
+                # 디버그 로그
                 data = json.loads(js)
-                ts = data.get("timestamp")
-                dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(kst)
-
                 fusion = data.get("fusion", {})
                 safe = fusion.get("safe", 0.0)
                 stressed = fusion.get("stressed", 0.0)
                 dominant = fusion.get("dominant", "unknown")
 
                 print(
-                    f"[SEND] {dt.strftime('%H:%M:%S')} "
-                    f"dominant={dominant} safe={safe:.3f} stressed={stressed:.3f}"
+                    f"[SEND] dominant={dominant} "
+                    f"safe={safe:.3f} stressed={stressed:.3f}"
                 )
+            else:
+                print("[INFO] 엔진 결과 없음 (FER/Sensor 데이터 부족)")
 
-            # 1초마다 한 번씩 전송 (주기 조절 가능)
+            # 전송 주기 (1초)
             await asyncio.sleep(1.0)
 
     except websockets.ConnectionClosed:
