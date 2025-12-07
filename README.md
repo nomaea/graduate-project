@@ -41,23 +41,30 @@
 
 ```text
 Multimodal/
-├── main.py                 # 콘솔 출력용 멀티모달 엔진 실행 스크립트
+├── main.py                 # 콘솔 출력용 멀티모달 엔진 실행
 ├── main_ws.py              # WebSocket 서버 (JSON 실시간 전송)
-├── multimodal_engine.py    # 멀티모달 Fusion 로직
-├── multimodal_types.py     # FusionResult 등 데이터 클래스 정의
-├── json_builder.py         # FusionResult → JSON 문자열 빌더
-├── sensor_interface.py     # 센서 인터페이스 추상 클래스
-├── fer_interface.py        # FER 인터페이스 추상 클래스
-├── sensor_types.py         # 센서 관련 타입 정의
-├── fer_types.py            # FER 관련 타입 정의
-├── mock/
-│   ├── fer_mock.py         # Mock FER Source (테스트용)
-│   └── sensor_mock.py      # Mock Sensor Source (테스트용)
-└── android_spec/
-    ├── FusionResponse.java # Android/Gson 파싱용 데이터 모델
-    ├── FusionParser.java   # JSON 문자열 → FusionResponse 파서
-    ├── sample_json.txt     # 실제 JSON 예시 1줄
-    └── example_output.txt  # 콘솔에서 출력되는 예시 (사람 읽기용)
-```
+│
+├── multimodal_engine.py    # 멀티모달 Fusion 핵심 로직
+├── multimodal_types.py     # FusionResult 데이터 구조 정의
+├── json_builder.py         # FusionResult → JSON 문자열 변환
+│
+├── fer_interface.py        # FER 공용 인터페이스 (수정 X)
+├── fer_types.py            # FER 결과 타입 정의
+├── real_fer_source.py      # ★ 실제 FER 출력 연결 (update_frame 내부만 향후 수정)
+│
+├── sensor_interface.py     # Sensor 공용 인터페이스 (수정 X)
+├── sensor_types.py         # Sensor 결과 타입 정의
+├── real_sensor_source.py   # ★ 실제 BIO 데이터 연결 (update_window 내부만 향후 수정)
+│
+├── mock/                   # (초기 테스트용 - 나중에 제거 예정)
+│   ├── fer_mock.py         # Mock FER Source
+│   └── sensor_mock.py      # Mock Sensor Source
+│
+└── android_spec/           # Android JSON 파싱 스펙
+    ├── FusionResponse.java
+    ├── FusionParser.java
+    ├── sample_json.txt
+    └── example_output.txt
+
 
 
