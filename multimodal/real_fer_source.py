@@ -4,7 +4,14 @@ from typing import Optional, Dict, Any
 
 import numpy as np
 import cv2
-from tensorflow.lite import Interpreter
+
+
+# 맥북(tensorflow-macos)과 라즈베리파이(tflite-runtime) 모두 호환되는 코드
+try:
+    import tensorflow as tf
+    Interpreter = tf.lite.Interpreter
+except ImportError:
+    from tflite_runtime.interpreter import Interpreter
 
 from fer_interface import FerSource
 from fer_types import FerResult
