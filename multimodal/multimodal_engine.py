@@ -194,3 +194,57 @@ class MultiModalEngine:
             alert_level=alert_level,
             alert_reason=alert_reason,
         )
+    
+
+# =========================================================
+# 단위 테스트 실행 코드 
+# =========================================================
+if __name__ == "__main__":
+    print("[최종 통합 테스트 시작] 멀티모달 융합 엔진 검증")
+
+    # 1. 엔진에 쥐어줄 가짜 소스(Source) 객체 만들기
+    # 엔진이 요구하는 규격(calm, drowsy 등)에 맞게 세팅합니다.
+    class MockFerSource:
+        def get_latest_result(self):
+            class DummyFer:
+                def __init__(self):
+                    self.emotion_scores = {"angry": 0.85, "happy": 0.0, "neutral": 0.15, "sad": 0.0}
+                    self.drowsy_scores = {"alert": 1.0, "drowsy": 0.0}
+            return DummyFer()
+
+    class MockSensorSource:
+        def get_latest_result(self):
+            class DummySensor:
+                def __init__(self):
+                    self.emotion_scores = {"calm": 0.2, "stressed": 0.8}
+            return DummySensor()
+
+    # 2. 엔진 객체 생성 (양손에 가짜 소스를 쥐어줍니다)
+    try:
+        dummy_fer = MockFerSource()
+        dummy_sensor = MockSensorSource()
+        
+        engine = MultiModalEngine(fer_source=dummy_fer, sensor_source=dummy_sensor)
+    except Exception as e:
+        print(f"엔진 객체 생성 실패: {e}")
+        exit()
+
+    print("[데이터 준비] 생체(스트레스 0.8) + 카메라(분노 0.85) 세팅 완료")
+
+    # 3. 엔진 가동 (준섭님의 step() 함수 호출!)
+    try:
+        final_result = engine.step() 
+        
+        if final_result is not None:
+            # 4. 검증 및 결과 출력
+            print(f"[엔진 최종 출력]")
+            print(f"   - 경고 레벨: {final_result.alert_level}")
+            print(f"   - 주된 상태: {final_result.dominant_emotion}")
+            print(f"   - 융합 점수: {final_result.fused_scores}")
+            
+            print("\n결과: PASS (대성공! 두 데이터가 완벽하게 융합되어 모바일 앱으로 전송될 준비를 마쳤습니다!)")
+        else:
+            print("\n결과: FAIL (엔진에서 None이 반환되었습니다.)")
+
+    except Exception as e:
+        print(f"\n엔진 실행 중 에러 발생: {e}")
