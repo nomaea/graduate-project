@@ -1,0 +1,11 @@
+{
+  "ts": 12345.678,
+  "seq": 10,
+  "class_order": ["neutral", "happy", "sad", "angry"],
+  "softmax": [0.82, 0.10, 0.04, 0.04],
+  "argmax_idx": 0,
+  "argmax_label": "neutral",
+  "source": "fer",
+  "face_detected": true,
+  "latency_ms": 38.4
+}
