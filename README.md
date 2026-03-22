@@ -262,3 +262,77 @@ FER 측 핵심 연동 포인트:
 * FER packet의 `ts`
 * FER packet의 `softmax`
 * 고정된 `class_order`
+
+---
+
+## Edge Device Python Environment
+
+라즈베리파이 엣지 디바이스에서는 기본 시스템 Python 3.13 대신,  
+`pyenv` 기반 **Python 3.11.11** 가상환경 `fer_facemesh311`을 별도로 구성하여 실행한다.
+
+이유:
+
+* `tflite-runtime`과 `mediapipe`의 호환성을 확보하기 위함
+* FER/BIO/멀티모달 통합 실행 시 버전 충돌을 줄이기 위함
+* Raspberry Pi 시스템 패키지와 추론용 Python 패키지를 분리 관리하기 위함
+
+### Environment Summary
+
+* Python: `3.11.11` (`pyenv` 기반)
+* Virtual Environment: `fer_facemesh311`
+* 실행 예시:
+
+```bash
+source ~/venvs/fer_facemesh311/bin/activate
+python main.py --mode run --tflite ./fer/models/efficientface_4cls_finetuned_fp16_float16.tflite --camera_backend tcp --tcp_host 127.0.0.1 --tcp_port 9999
+```
+
+### Core Libraries and Versions
+
+아래는 엣지 디바이스 통합 실행 기준 핵심 라이브러리이다.
+
+| Category | Library | Version | Notes |
+|---|---|---:|---|
+| Runtime | Python | 3.11.11 | `pyenv` 기반 별도 구축 |
+| FER Inference | `tflite-runtime` | 2.14.0 | TFLite 추론 엔진 |
+| Landmark / FaceMesh | `mediapipe` | 0.10.18 | FaceMesh 기반 landmark 추출 |
+| Numerical | `numpy` | 1.26.4 | 전처리 / softmax / 배열 연산 |
+| MediaPipe Dependency | `jax` | 0.7.1 | MediaPipe 설치 시 함께 구성 |
+| MediaPipe Dependency | `jaxlib` | 0.7.1 | MediaPipe 설치 시 함께 구성 |
+
+### System Packages Used Together
+
+카메라 입력은 별도 `camera_service.py`에서 처리하며, 이 부분은 Raspberry Pi OS의 시스템 패키지를 사용한다.
+가상환경 내부 추론 프로세스와 분리된 이유는 `picamera2`/`libcamera` 계열 패키지가 시스템 Python과 더 강하게 결합되어 있기 때문이다.
+
+주요 시스템 패키지:
+
+* `python3-picamera2`
+* `python3-libcamera`
+* `python3-opencv`
+
+즉, 현재 구조는 다음과 같이 분리된다.
+
+* **camera_service.py** → 시스템 Python + Picamera2
+* **main.py / FER / BIO / multimodal** → `pyenv` 기반 Python 3.11 가상환경
+
+### Recommended Version Check Commands
+
+실제 운영 직전에는 아래 명령으로 버전을 다시 확인하는 것을 권장한다.
+
+```bash
+source ~/venvs/fer_facemesh311/bin/activate
+python -c "import sys; print(sys.version)"
+python -c "import numpy; print('numpy', numpy.__version__)"
+python -c "import mediapipe as mp; print('mediapipe', mp.__version__)"
+python -c "import jax; print('jax', jax.__version__)"
+python -c "import jaxlib; print('jaxlib', jaxlib.__version__)"
+python -c "from tflite_runtime.interpreter import Interpreter; print('tflite-runtime OK')"
+```
+
+시스템 카메라 패키지는 별도로 확인한다.
+
+```bash
+python3 -c "from picamera2 import Picamera2; print('picamera2 OK')"
+python3 -c "import cv2; print(cv2.__version__)"
+```
