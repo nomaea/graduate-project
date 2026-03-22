@@ -1,0 +1,5 @@
+ts_iso,ts_unix,red,ir,bpm,rmssd_s,gsr,gsr_mean_5s,gsr_slope_1s,gsr_peak_10s,bpm_c,rmssd_inv,gsr_slope_c,gsr_peak_c,bio_arousal,bio_conf,ppgQ,finger_on,gsr_fresh,note
+2026-02-25 19:43:03,1772016183.452,,,,,,,,0,,,0.00,0.00,0.0,0.0,0.0,0,0,finger_off
+2026-02-25 19:43:04,1772016184.452,,,,,,,,0,,,0.00,0.00,0.0,0.0,0.0,0,0,finger_off
+2026-02-25 19:43:05,1772016185.452,,,,,246,246.0,0.0,0,,,0.00,0.00,0.0,0.0,0.0,0,1,finger_off
+2026-02-25 19:43:06,1772016186.452,,,,,214,230.0,0.0,0,,,0.00,0.00,0.0,0.0,0.0,0,1,finger_off

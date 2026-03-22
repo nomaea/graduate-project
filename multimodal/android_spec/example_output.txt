@@ -1,0 +1,8 @@
+[Timestamp] 2025-11-29 20:26:33.330 (KST) 
+[Fusion 결과] safe : 0.736 stressed : 0.264 dominant : safe confidence: 0.736 
+[Alert] level : WARNING reason: Stress level is elevated (EMA=0.51) 
+[Sensor(raw)] hrv : 61.354 gsr : 0.745 
+[FER] emotion_scores: angry : 0.276 sad : 0.119 happy : 0.109 neutral: 0.497 drowsy_scores: alert : 0.612 drowsy : 0.388
+
+
+// 이건 그냥 참고용
