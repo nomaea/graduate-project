@@ -2,27 +2,19 @@
 import asyncio
 import json
 from datetime import datetime, timezone, timedelta
-from queue import Queue
 
 import websockets
 
-from fer_api import FERQueuePublisher
-from fer_core import FERCore
 from real_fer_source import RealFerSource
 from real_sensor_source import RealSensorSource
 from multimodal_engine import MultiModalEngine
 from json_builder import fusion_result_to_json
+from shared_queue import fer_queue
 
-
-# ── FER 큐 생성 및 FERCore 연결 ───────────────────────────
-fer_queue = Queue(maxsize=1)
-publisher = FERQueuePublisher(out_queue=fer_queue, debug_print=False)
-fer_core  = FERCore(
-    tflite_path="graduate-project-feature-fer/models/efficientface_4cls_finetuned_fp16_float16.tflite",
-    publisher=publisher,
-)
 
 # ── 전역 초기화 ───────────────────────────────────────────
+# fer_queue는 shared_queue.py에서 가져옴
+# FER 친구가 자기 코드에서 fer_queue에 넣어줌
 fer_src    = RealFerSource(fer_queue=fer_queue)
 sensor_src = RealSensorSource()
 
@@ -35,27 +27,6 @@ engine = MultiModalEngine(
 )
 
 kst = timezone(timedelta(hours=9))
-
-# ── 웹캠 전역 오픈 ────────────────────────────────────────
-import cv2
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-if not cap.isOpened():
-    print("[WARN] 웹캠을 열 수 없습니다.")
-    cap = None
-
-
-# ── 웹캠 루프 (백그라운드) ────────────────────────────────
-async def camera_loop():
-    """0.1초마다 웹캠 프레임 읽어서 FERCore 추론 → fer_queue에 자동 적재"""
-    while True:
-        if cap is not None:
-            ok, frame = cap.read()
-            if ok:
-                frame = cv2.flip(frame, 1)
-                fer_core.process_frame(frame)
-        await asyncio.sleep(0.1)
 
 
 # ── 앱으로 송신하는 루프 ──────────────────────────────────
@@ -92,11 +63,8 @@ async def main():
     print("[INFO] 멀티모달 WebSocket 서버 시작")
     print("[INFO] 앱 접속 주소: ws://내노트북IP:8765")
 
-    await asyncio.gather(
-        camera_loop(),
-        websockets.serve(send_loop, "0.0.0.0", 8765),
-    )
-    await asyncio.Future()
+    async with websockets.serve(send_loop, "0.0.0.0", 8765):
+        await asyncio.Future()
 
 
 if __name__ == "__main__":

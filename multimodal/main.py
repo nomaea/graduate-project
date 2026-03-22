@@ -4,24 +4,17 @@ import json
 from datetime import datetime, timezone, timedelta
 from queue import Queue
 
-from fer_api import FERQueuePublisher
-from fer_core import FERCore
 from real_fer_source import RealFerSource
 from real_sensor_source import RealSensorSource
 from multimodal_engine import MultiModalEngine
 from json_builder import fusion_result_to_json
+from shared_queue import fer_queue
 
 
 def main():
-    # ── 1) FER 큐 생성 및 FERCore 연결 ──────────────────────
-    fer_queue = Queue(maxsize=1)
-    publisher = FERQueuePublisher(out_queue=fer_queue, debug_print=False)
-    fer_core  = FERCore(
-        tflite_path="graduate-project-feature-fer/models/efficientface_4cls_finetuned_fp16_float16.tflite",
-        publisher=publisher,
-    )
-
-    # ── 2) 소스 및 엔진 초기화 ───────────────────────────────
+    # ── 소스 및 엔진 초기화 ───────────────────────────────
+    # fer_queue는 shared_queue.py에서 가져옴
+    # FER 친구가 자기 코드에서 fer_queue에 넣어줌
     fer_src    = RealFerSource(fer_queue=fer_queue)
     sensor_src = RealSensorSource()
 
@@ -34,7 +27,7 @@ def main():
     )
 
     print("[INFO] 멀티모달 엔진 시작")
-    print("[INFO] FER 친구 웹캠 실행 중...")
+    print("[INFO] FER 친구 데이터 대기 중...")
     print("[INFO] 찬희 BIO 데이터 대기 중...\n")
 
     kst      = timezone(timedelta(hours=9))
@@ -42,7 +35,6 @@ def main():
 
     try:
         while True:
-            # FERCore는 내부적으로 웹캠 읽고 fer_queue에 넣어줌
             result   = engine.step()
             step_idx += 1
             print(f"\n========== STEP {step_idx} ==========")
@@ -95,8 +87,6 @@ def main():
 
     except KeyboardInterrupt:
         print("\n[INFO] 종료")
-    finally:
-        fer_core.close()
 
 
 if __name__ == "__main__":
