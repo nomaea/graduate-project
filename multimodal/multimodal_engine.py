@@ -95,13 +95,37 @@ class MultiModalEngine:
         fer_res = self.fer_source.get_latest_result()
         sensor_res = self.sensor_source.get_latest_result()
 
-        if fer_res is None or sensor_res is None:
+        # 1. 영상(FER) 데이터조차 없으면 아예 판단 불가 (대기)
+        if fer_res is None:
             return None
 
         self.last_fer = fer_res
-        self.last_sensor = sensor_res
-
         fer_safe_stress = self._convert_fer_to_safe_stress(fer_res)
+
+        # 2. 영상은 있는데 생체(BIO) 데이터가 아직 없는 경우 (초기 센서 분석 대기 중)
+        if sensor_res is None:
+            dominant = "stressed" if fer_safe_stress["stressed"] >= fer_safe_stress["safe"] else "safe"
+            alert_level, alert_reason = self._decide_alert(fer_safe_stress, fer_res)
+            
+            # 임시 더미 센서 데이터 생성
+            dummy_sensor = SensorResult(
+                raw_metrics={"bpm": 0.0, "hrv": 0.0, "gsr": 0.0},
+                emotion_scores={"safe": 0.0, "stressed": 0.0}
+            )
+
+            return FusionResult(
+                timestamp=time.time(),
+                fused_scores=fer_safe_stress,  # FER 데이터만 100% 반영
+                dominant_emotion=dominant,
+                confidence=fer_safe_stress[dominant],
+                fer=fer_res,
+                sensor=dummy_sensor,
+                alert_level=alert_level,
+                alert_reason=f"[FER Only] {alert_reason}"
+            )
+
+        # 3. 영상과 생체 데이터가 모두 준비된 경우 (정상 퓨전 진행)
+        self.last_sensor = sensor_res
         sensor_safe_stress = self._convert_sensor_to_safe_stress(sensor_res)
 
         fused_scores = self._fuse_scores(fer_safe_stress, sensor_safe_stress)
@@ -120,3 +144,5 @@ class MultiModalEngine:
             alert_level=alert_level,
             alert_reason=alert_reason,
         )
+
+ 
