@@ -1,0 +1,5 @@
+ts_iso,ts_unix,red,ir,bpm_raw,bpm_filt,rmssd_raw,rmssd_ema,rmssd_filt,gsr_raw,gsr_filt,gsr_slope_1s,gsr_peak_10s,arousal_raw,arousal_filt,bio_conf,ppgQ,finger_on,gsr_fresh,note
+2026-03-04 09:39:33,1772584773.098,873,1427,,,,,,,,,0,0.00,0.00,0.00,0.00,0,0,finger_off|hold_low_ppgQ
+2026-03-04 09:39:34,1772584774.098,899,1392,,,,,,,,,0,0.00,0.00,0.00,0.00,0,0,finger_off|hold_low_ppgQ
+2026-03-04 09:39:35,1772584775.098,967,1628,,,,,,243,244,0.0,0,0.00,0.00,0.00,0.00,0,1,finger_off|hold_low_ppgQ
+2026-03-04 09:39:36,1772584776.098,971,1509,,,,,,220,220,-24.0,0,0.70,0.50,0.00,0.00,0,1,finger_off|hold_low_ppgQ
