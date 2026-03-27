@@ -136,26 +136,13 @@ class MultiModalEngine:
         fer_res    = self.fer_source.get_latest_result()
         sensor_res = self.sensor_source.get_latest_result()
 
-        # [MUL#2] Degraded Mode: 한쪽 모달리티만 있어도 동작
-        if fer_res is None and sensor_res is None:
+        if fer_res is None or sensor_res is None:
             return None
 
-        degraded = False
-        if sensor_res is None:
-            # FER-only 모드: BIO가 아직 준비되지 않았거나 연결 실패
-            sensor_res = self._make_neutral_sensor()
-            degraded   = True
-            _logger.debug("[MultiModal] Degraded mode: BIO unavailable, using neutral sensor.")
-        elif fer_res is None:
-            # BIO-only 모드: FER 모델 로드 실패 또는 카메라 없음
-            fer_res  = self._make_neutral_fer()
-            degraded = True
-            _logger.debug("[MultiModal] Degraded mode: FER unavailable, using neutral FER.")
-
-        self.last_fer    = fer_res
+        self.last_fer = fer_res
         self.last_sensor = sensor_res
 
-        fer_safe_stress    = self._convert_fer_to_safe_stress(fer_res)
+        fer_safe_stress = self._convert_fer_to_safe_stress(fer_res)
         sensor_safe_stress = self._convert_sensor_to_safe_stress(sensor_res)
 
         fused_scores = self._fuse_scores(fer_safe_stress, sensor_safe_stress)
@@ -191,3 +178,5 @@ class MultiModalEngine:
             alert_level=alert_level,
             alert_reason=alert_reason,
         )
+
+ 
