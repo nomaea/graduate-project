@@ -88,7 +88,9 @@ class PPGProcessor:
         return True
 
     def _detect_peak(self, t: float):
-        if len(self.ir_filt) < 5:
+        # [FER#8] 최소 길이 5 → 10: 배치 입력 중 _reset_keep_raw() 직후
+        # ir_filt에 리셋 이전·이후 데이터가 혼합되는 경우를 방지
+        if len(self.ir_filt) < 10:
             return
 
         (t1, y1) = self.ir_filt[-3]

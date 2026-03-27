@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Optional
 
@@ -18,9 +19,15 @@ LABELS = ["neutral", "happy", "sad", "angry"]
 IMG_SIZE = 224
 
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
-PROB_EMA = 0.65
+# [FER#4] 0.65 → 0.4: 새 감지 결과가 약 3프레임 이내에 50% 이상 반영됨
+PROB_EMA = 0.4
+
+# [FER#2] 이 프레임 수 이상 얼굴이 없으면 prob_ema 리셋
+NO_FACE_RESET_FRAMES = 5
+
+_logger = logging.getLogger(__name__)
 
 
 def softmax(x: np.ndarray) -> np.ndarray:
@@ -65,6 +72,21 @@ def make_square_box(x1, y1, x2, y2, frame_w, frame_h, scale=1.45):
     return nx1, ny1, nx2, ny2
 
 
+def _pad_to_square(roi: np.ndarray) -> np.ndarray:
+    """[FER#3] 프레임 경계 클램핑으로 비정방형이 된 ROI를 제로 패딩으로 정방형으로 만든다.
+    cv2.resize(non-square → 224x224) 시 얼굴 왜곡 방지.
+    """
+    h, w = roi.shape[:2]
+    if h == w:
+        return roi
+    side = max(h, w)
+    padded = np.zeros((side, side, 3), dtype=roi.dtype)
+    pad_y = (side - h) // 2
+    pad_x = (side - w) // 2
+    padded[pad_y:pad_y + h, pad_x:pad_x + w] = roi
+    return padded
+
+
 def preprocess_roi_bgr(roi_bgr: np.ndarray):
     roi_resized = cv2.resize(roi_bgr, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
     roi_rgb = cv2.cvtColor(roi_resized, cv2.COLOR_BGR2RGB)
@@ -77,7 +99,7 @@ def preprocess_roi_bgr(roi_bgr: np.ndarray):
 def get_mesh_aligned_roi(frame_bgr: np.ndarray, face_landmarks, scale=1.45):
     fh, fw = frame_bgr.shape[:2]
 
-    LEFT_EYE_OUTER = 33
+    LEFT_EYE_OUTER  = 33
     RIGHT_EYE_OUTER = 263
 
     pts = []
@@ -90,11 +112,13 @@ def get_mesh_aligned_roi(frame_bgr: np.ndarray, face_landmarks, scale=1.45):
     lx, ly = pts[LEFT_EYE_OUTER]
     rx, ry = pts[RIGHT_EYE_OUTER]
 
-    angle = np.degrees(np.arctan2(ry - ly, rx - lx))
+    angle      = np.degrees(np.arctan2(ry - ly, rx - lx))
     eye_center = ((lx + rx) / 2.0, (ly + ry) / 2.0)
 
     rotated, rot_mat = rotate_image(frame_bgr, angle, eye_center)
-    rot_pts = np.array([transform_point(x, y, rot_mat) for x, y in pts], dtype=np.float32)
+    rot_pts = np.array(
+        [transform_point(x, y, rot_mat) for x, y in pts], dtype=np.float32
+    )
 
     min_x = float(np.min(rot_pts[:, 0]))
     max_x = float(np.max(rot_pts[:, 0]))
@@ -106,6 +130,7 @@ def get_mesh_aligned_roi(frame_bgr: np.ndarray, face_landmarks, scale=1.45):
         return None
 
     roi_bgr = rotated[y1:y2, x1:x2]
+    roi_bgr = _pad_to_square(roi_bgr)  # [FER#3] 정방형 패딩 적용
     return roi_bgr
 
 
@@ -120,10 +145,11 @@ class FERCore:
         self.publisher = publisher
         self.seq = 0
         self.prob_ema = None
+        self._no_face_count = 0  # [FER#2] 연속 얼굴 미감지 프레임 카운터
 
         self.interpreter = Interpreter(model_path=tflite_path)
         self.interpreter.allocate_tensors()
-        self.input_details = self.interpreter.get_input_details()[0]
+        self.input_details  = self.interpreter.get_input_details()[0]
         self.output_details = self.interpreter.get_output_details()[0]
 
         self.mp_face_mesh = mp.solutions.face_mesh
@@ -136,51 +162,59 @@ class FERCore:
         )
 
     def process_frame(self, frame_bgr: np.ndarray, return_debug: bool = False):
-        frame_ts = time.monotonic()
+        frame_ts = time.time()  # [FER#6] monotonic → time.time() (BIO와 기준 통일)
 
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        rgb     = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         results = self.face_mesh.process(rgb)
 
-        probs_out = None
+        probs_out    = None
         face_detected = False
-        roi_preview = None
+        roi_preview  = None
 
         if results.multi_face_landmarks:
             face_landmarks = results.multi_face_landmarks[0]
-            aligned_roi = get_mesh_aligned_roi(frame_bgr, face_landmarks, scale=1.45)
+            aligned_roi    = get_mesh_aligned_roi(frame_bgr, face_landmarks, scale=1.45)
 
             if aligned_roi is not None and aligned_roi.size > 0:
-                face_detected = True
-                x_nhwc, roi_preview = preprocess_roi_bgr(aligned_roi)
+                face_detected        = True
+                self._no_face_count  = 0  # [FER#2] 얼굴 감지 시 카운터 리셋
+                x_nhwc, roi_preview  = preprocess_roi_bgr(aligned_roi)
                 x_in = x_nhwc.astype(self.input_details["dtype"])
 
-                self.interpreter.set_tensor(self.input_details["index"], x_in)
-                self.interpreter.invoke()
-                out = self.interpreter.get_tensor(self.output_details["index"])[0]
-                probs = softmax(out)
+                try:  # [FER#1] TFLite 추론 예외 처리 — 크래시 방지
+                    self.interpreter.set_tensor(self.input_details["index"], x_in)
+                    self.interpreter.invoke()
+                    out   = self.interpreter.get_tensor(self.output_details["index"])[0]
+                    probs = softmax(out)
+                except Exception as exc:
+                    _logger.warning("[FER] TFLite inference failed, skipping frame: %s", exc)
+                    probs = None
 
-                if self.prob_ema is None:
-                    self.prob_ema = probs.copy()
-                else:
-                    self.prob_ema = PROB_EMA * self.prob_ema + (1.0 - PROB_EMA) * probs
+                if probs is not None:
+                    if self.prob_ema is None:
+                        self.prob_ema = probs.copy()
+                    else:
+                        self.prob_ema = PROB_EMA * self.prob_ema + (1.0 - PROB_EMA) * probs
+                    probs_out = self.prob_ema.copy()
 
-                probs_out = self.prob_ema.copy()
-
+        # [FER#2] 얼굴 없는 프레임이 N개 이상 지속되면 EMA 리셋 (이전 사람 감정 잔류 방지)
         if probs_out is None:
-            if return_debug:
-                return {
-                    "packet": None,
-                    "roi_preview": None,
-                    "face_detected": False,
-                }
-            return None
+            self._no_face_count += 1
+            if self._no_face_count >= NO_FACE_RESET_FRAMES and self.prob_ema is not None:
+                _logger.debug(
+                    "[FER] No face for %d frames — resetting prob_ema", self._no_face_count
+                )
+                self.prob_ema = None
 
-        argmax_idx = int(np.argmax(probs_out))
+            # [FER#5] 항상 dict 반환으로 통일 (None 반환 제거)
+            return {"packet": None, "roi_preview": None, "face_detected": False}
+
+        argmax_idx   = int(np.argmax(probs_out))
         argmax_label = LABELS[argmax_idx]
-        latency_ms = (time.monotonic() - frame_ts) * 1000.0
+        latency_ms   = (time.time() - frame_ts) * 1000.0
 
         packet = FERPacket(
-            ts=frame_ts,
+            ts=frame_ts,  # [FER#6] time.time() 기반
             seq=self.seq,
             class_order=LABELS,
             softmax=[float(x) for x in probs_out],
@@ -196,14 +230,10 @@ class FERCore:
 
         packet_dict = packet.to_dict()
 
+        # [FER#5] return_debug 여부와 무관하게 항상 동일한 구조의 dict 반환
         if return_debug:
-            return {
-                "packet": packet_dict,
-                "roi_preview": roi_preview,
-                "face_detected": face_detected,
-            }
-
-        return packet_dict
+            return {"packet": packet_dict, "roi_preview": roi_preview, "face_detected": face_detected}
+        return {"packet": packet_dict, "roi_preview": None, "face_detected": face_detected}
 
     def close(self):
         self.face_mesh.close()

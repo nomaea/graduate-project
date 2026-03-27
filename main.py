@@ -1,5 +1,6 @@
 import argparse
 import csv
+import logging
 import os
 import socket
 import struct
@@ -7,19 +8,26 @@ import threading
 import time
 from queue import Queue, Empty
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+
 import cv2
 import numpy as np
 
 from fer.fer_api import FERQueuePublisher
 from fer.fer_core import FERCore
 from fer.fer_visualizer import run_visualizer
-
 from bio.bio_engine_core import main as bio_engine_main
 
 from multimodal.real_fer_source import RealFerSource
 from multimodal.real_sensor_source import RealSensorSource
 from multimodal.multimodal_engine import MultiModalEngine
 from multimodal.json_builder import fusion_result_to_json
+
+# ▼▼▼ 분리한 ws_server.py 모듈에서 함수 불러오기 ▼▼▼
+from multimodal.ws_server import start_ws_server, ws_broadcast
 
 
 class SocketFrameReceiver:
@@ -206,8 +214,9 @@ class RuntimeController:
         self.tcp_port = tcp_port
         self.flip_horizontal = flip_horizontal
 
-        self.fer_queue = Queue(maxsize=1)
-        self.bio_payload_queue = Queue(maxsize=1)
+        # 큐 사이즈 넉넉하게 수정 (미응답 병목 방지)
+        self.fer_queue = Queue(maxsize=30)
+        self.bio_payload_queue = Queue(maxsize=10)
 
         self.fer_core = None
         self.cap = None
@@ -223,6 +232,11 @@ class RuntimeController:
 
         self.last_fusion_result = None
         self.last_packet = None
+        self._crop_window_open = False  # [FER#9] 창 생성 상태 추적
+
+        # ▼▼▼ 분리한 ws_server 모듈을 스레드로 실행 ▼▼▼
+        self.ws_thread = threading.Thread(target=start_ws_server, daemon=True)
+        self.ws_thread.start()
 
     def _start_bio_thread(self):
         self.bio_thread = threading.Thread(
@@ -245,15 +259,12 @@ class RuntimeController:
 
         if latest is not None:
             self.sensor_source.update_window(latest)
-            print(
-                f"[DEBUG][BIO_QUEUE] drained={drained} "
-                f"bpm={latest.get('bpm')} "
-                f"bio_arousal={latest.get('bio_arousal')} "
-                f"bio_conf={latest.get('bio_conf')} "
-                f"note={latest.get('note')}"
+            # [FER#10] 매 프레임 콘솔 출력 → logging.debug() 로 교체 (Raspberry Pi I/O 부하 방지)
+            logging.debug(
+                "[BIO_QUEUE] drained=%d bpm=%s bio_arousal=%s bio_conf=%s note=%s",
+                drained, latest.get("bpm"), latest.get("bio_arousal"),
+                latest.get("bio_conf"), latest.get("note"),
             )
-        else:
-            print("[DEBUG][BIO_QUEUE] no new payload")
 
     def init_components(self):
         fer_publisher = FERQueuePublisher(
@@ -318,17 +329,17 @@ class RuntimeController:
             sensor_latest = self.sensor_source.get_latest_result()
             fer_latest = self.fer_source.get_latest_result()
 
-            print("[DEBUG][STATE] last_packet =", self.last_packet is not None)
-            print("[DEBUG][STATE] fer_latest =", fer_latest is not None)
-            print("[DEBUG][STATE] sensor_latest =", sensor_latest is not None)
-
             fusion_result = self.mm_engine.step()
-            print("[DEBUG][STATE] fusion_result =", fusion_result is not None)
 
             if fusion_result is not None:
                 self.last_fusion_result = fusion_result
                 self.fusion_logger.write(fusion_result)
-                print("[FUSION_JSON]", fusion_result_to_json(fusion_result))
+                
+                fusion_json_str = fusion_result_to_json(fusion_result)
+                # [MUL#8] 매 프레임 JSON 전체 출력 → logging.debug()로 교체 (I/O 부하 방지)
+                logging.debug("[FUSION_JSON] %s", fusion_json_str)
+
+                ws_broadcast(fusion_json_str)
 
             display = frame.copy()
             cv2.putText(
@@ -497,12 +508,12 @@ class RuntimeController:
                     cv2.LINE_AA,
                 )
                 cv2.imshow("Face Crop Preview", roi_canvas)
+                self._crop_window_open = True
             else:
-                try:
-                    if cv2.getWindowProperty("Face Crop Preview", cv2.WND_PROP_VISIBLE) >= 0:
-                        cv2.destroyWindow("Face Crop Preview")
-                except cv2.error:
-                    pass
+                # [FER#9] 창 상태 플래그로 관리 — getWindowProperty 불필요한 예외 방지
+                if self._crop_window_open:
+                    cv2.destroyWindow("Face Crop Preview")
+                    self._crop_window_open = False
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
