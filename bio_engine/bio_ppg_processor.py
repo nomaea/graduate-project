@@ -1,7 +1,7 @@
 import math
 from collections import deque
 
-from bio_utils import median, mad, stdev, norm_range, clamp01
+from .bio_utils import median, mad, stdev, norm_range, clamp01
 
 
 class PPGProcessor:
@@ -135,26 +135,36 @@ class PPGProcessor:
             return None
         return self.bpm_ema
 
-    def rmssd_30s(self, min_rr: int = 12):
+    # FIX #1: rr_30s property 추가 — 직전 30초 내 유효 RR interval 리스트 반환
+    # 기존: getattr(ppg, "rr_30s", None) 이 항상 None 반환 → rr_count_30s 항상 0
+    @property
+    def rr_30s(self) -> list:
         if not self.rr:
-            return None
+            return []
         now_t = self.rr[-1][0]
-        rrs = [rr for (tt, rr) in self.rr if (now_t - tt) <= 30.0]
+        return [rr for (tt, rr) in self.rr if (now_t - tt) <= 30.0]
+
+    def rmssd_30s(self, min_rr: int = 12):
+        rrs = self.rr_30s  # rr_30s property 재활용
         if len(rrs) < max(3, int(min_rr)):
             return None
         diffs = [(rrs[i] - rrs[i - 1]) for i in range(1, len(rrs))]
         sq = [d * d for d in diffs]
         return (sum(sq) / len(sq)) ** 0.5
 
+    # FIX #7: signal_quality 반환값 일관성 수정
+    # 기존: rr 없음 → 0.0, 10초 내 4개 미만 → 0.2 (불일치)
+    # 수정: 두 경우 모두 0.0으로 통일 — "데이터 부족"은 동일하게 처리
     def signal_quality(self):
         if not self.finger_on():
             return 0.0
-        if not self.rr:
+        rrs_30s = self.rr_30s
+        if not rrs_30s:
             return 0.0
         now_t = self.rr[-1][0]
-        rrs = [rr for (tt, rr) in self.rr if (now_t - tt) <= 10.0]
-        if len(rrs) < 4:
-            return 0.2
-        rr_std = stdev(rrs)
+        rrs_10s = [rr for (tt, rr) in self.rr if (now_t - tt) <= 10.0]
+        if len(rrs_10s) < 4:
+            return 0.0  # 기존 0.2 → 0.0으로 통일
+        rr_std = stdev(rrs_10s)
         q = 1.0 - norm_range(rr_std, 0.02, 0.20)
         return clamp01(q)

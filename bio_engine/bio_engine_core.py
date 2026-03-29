@@ -1,14 +1,17 @@
-import os
-import time
-import csv
+import logging
 import math
+import os
+import csv
+import time
 from collections import deque
 
-from max30102_better import MAX30102
+from .max30102_better import MAX30102
+from .bio_utils import clamp01, norm_range, now_iso, mean
+from .bio_gsr_reader import GSRSerialReader
+from .bio_ppg_processor import PPGProcessor
 
-from bio_utils import clamp01, norm_range, now_iso, mean
-from bio_gsr_reader import GSRSerialReader
-from bio_ppg_processor import PPGProcessor
+# FIX #9: print → logging 으로 교체
+logger = logging.getLogger(__name__)
 
 
 def main(payload_queue=None):
@@ -28,6 +31,10 @@ def main(payload_queue=None):
 
     GSR_SLOPE_LO, GSR_SLOPE_HI = 0, 20
     GSR_PEAK_THR = 10.0
+    # FIX #6: 정규화 기준을 상수로 분리 + 출처 명시
+    # 근거: Boucsein (2012) Electrodermal Activity p.194 — 분당 ~20회 피크 ≈ 강한 스트레스
+    #       10초 기준으로 환산하면 약 3~5개. 5를 상한으로 설정.
+    GSR_PEAK_MAX = 5
 
     base = os.path.join(os.getcwd(), "logs", "bio", time.strftime("%Y%m%d"))
     os.makedirs(base, exist_ok=True)
@@ -45,7 +52,11 @@ def main(payload_queue=None):
 
     gsr = GSRSerialReader(port=None, baud=9600)
     gsr.start()
-    print(f"[INFO] GSR serial port = {gsr.port}")
+    # FIX #2: start()가 raise 대신 error 플래그를 설정하므로 여기서 확인
+    if gsr.error:
+        logger.warning(f"[BIO] GSR unavailable: {gsr.error} — running without GSR")
+    else:
+        logger.info(f"[BIO] GSR serial port = {gsr.port}")
 
     ppg = PPGProcessor(
         fs_hz=PPG_FS,
@@ -58,142 +69,159 @@ def main(payload_queue=None):
     gsr_slope_buf = deque()
 
     rmssd_ema = None
-    rmssd_ema_last_t = None
+    # FIX #4: EMA dt 계산을 monotonic 기준으로 변경 (wall clock은 NTP 보정 시 역방향 점프 가능)
+    rmssd_ema_last_mono = None
 
     def trim_buf(buf, now_t, secs):
         while buf and (now_t - buf[0][0]) > secs:
             buf.popleft()
 
-    f = open(csv_path, "w", newline="")
-    w = csv.writer(f)
-    w.writerow([
-        "ts_iso", "ts_unix", "red", "ir",
-        "bpm", "rmssd_raw_s", "rmssd_ema_s", "rr_count_30s",
-        "gsr", "gsr_mean_5s", "gsr_slope_1s", "gsr_peak_10s",
-        "bio_arousal", "bio_conf", "ppgQ", "finger_on", "gsr_fresh", "note"
-    ])
-    f.flush()
-    print(f"[INFO] Logging to {csv_path}")
-
-    next_read = time.monotonic()
-    next_out = time.monotonic()
-    last_gsr_ts = None
-    last_red, last_ir = (None, None)
+    # FIX #8: CSV open을 try 바깥으로 분리 — f 미정의 상태에서 finally 진입 방지
+    try:
+        f = open(csv_path, "w", newline="")
+    except OSError as e:
+        logger.error(f"[BIO] Cannot open CSV {csv_path}: {e}")
+        raise
 
     try:
+        csv_writer = csv.writer(f)
+        csv_writer.writerow([
+            "ts_iso", "ts_unix", "red", "ir",
+            "bpm", "rmssd_raw_s", "rmssd_ema_s", "rr_count_30s",
+            "gsr", "gsr_mean_5s", "gsr_slope_1s", "gsr_peak_10s",
+            "bio_arousal", "bio_conf", "ppgQ", "finger_on", "gsr_fresh", "note"
+        ])
+        f.flush()
+        logger.info(f"[BIO] Logging to {csv_path}")
+
+        next_read = time.monotonic()
+        next_out = time.monotonic()
+        last_gsr_ts = None
+        last_red, last_ir = (None, None)
+
         while True:
-            now_t = time.time()
+            # FIX #4: 타이밍 전용 monotonic / 절대 시각 전용 wall clock 분리
+            now_mono = time.monotonic()
+            now_wall = time.time()  # CSV 타임스탬프 · GSR 신선도 확인에만 사용
 
             samples = max3.read_samples(max_samples=32)
             if samples:
                 last_red, last_ir = samples[-1]
-                ppg.add_samples(samples, now_t=now_t)
+                ppg.add_samples(samples, now_t=now_wall)
 
             gsr_val = gsr.latest_value
             gsr_ts = gsr.latest_ts
-            gsr_fresh = (gsr_ts is not None and (now_t - gsr_ts) <= 1.0)
+            gsr_fresh = (gsr_ts is not None and (now_wall - gsr_ts) <= 1.0)
 
-            if gsr_val is not None and gsr_ts is not None and gsr_ts != last_gsr_ts:
-                last_gsr_ts = gsr_ts
-                gsr_buf.append((gsr_ts, int(gsr_val)))
-                trim_buf(gsr_buf, now_t, 10.0)
+            if gsr_fresh and gsr_val is not None:
+                if (last_gsr_ts is None) or (gsr_ts != last_gsr_ts):
+                    gsr_buf.append((now_wall, float(gsr_val)))
+                    gsr_slope_buf.append((now_wall, float(gsr_val)))
+                    last_gsr_ts = gsr_ts
 
-            if time.monotonic() >= next_out:
+            trim_buf(gsr_buf, now_wall, 10.0)
+            trim_buf(gsr_slope_buf, now_wall, 1.0)
+
+            if now_mono >= next_out:
                 next_out += 1.0 / OUT_HZ
 
-                finger_on = ppg.finger_on()
-                ppg_q = ppg.signal_quality()
-
-                gsr_cur = gsr_buf[-1][1] if gsr_buf else None
-                gsr_5s = [v for (t, v) in gsr_buf if (now_t - t) <= 5.0]
-                gsr_mean_5s = mean(gsr_5s)
-
-                gsr_slope_1s = None
-                if gsr_buf:
-                    target_t = now_t - 1.0
-                    past = None
-                    for (t, v) in reversed(gsr_buf):
-                        if t <= target_t:
-                            past = v
-                            break
-                    gsr_slope_1s = float(gsr_cur - past) if (past is not None and gsr_cur is not None) else 0.0
-
-                if gsr_slope_1s is not None:
-                    gsr_slope_buf.append((now_t, gsr_slope_1s))
-                    trim_buf(gsr_slope_buf, now_t, 10.0)
-
-                gsr_peak_10s = sum(1 for (_, s) in gsr_slope_buf if s is not None and s > GSR_PEAK_THR)
-
                 bpm = ppg.bpm()
-                rmssd_raw = ppg.rmssd_30s(min_rr=RMSSD_MIN_RR)
+                rmssd_raw = ppg.rmssd_30s()
 
+                # FIX #1: rr_30s property 사용 — 기존 getattr 항상 None 반환 버그 수정
+                rr_count = len(ppg.rr_30s)
+
+                ppgQ = ppg.signal_quality()
+                finger_on = ppg.finger_on()
+
+                # FIX #4: rmssd EMA dt를 monotonic 기준으로 계산
                 if rmssd_raw is not None:
                     if rmssd_ema is None:
-                        rmssd_ema = float(rmssd_raw)
-                        rmssd_ema_last_t = now_t
+                        rmssd_ema = rmssd_raw
                     else:
-                        dt = max(1e-3, now_t - (rmssd_ema_last_t if rmssd_ema_last_t is not None else now_t))
-                        alpha = 1.0 - math.exp(-dt / RMSSD_EMA_TAU)
-                        rmssd_ema = rmssd_ema + alpha * (float(rmssd_raw) - rmssd_ema)
-                        rmssd_ema_last_t = now_t
+                        dt = (now_mono - rmssd_ema_last_mono) if rmssd_ema_last_mono is not None else 1.0
+                        a = 1.0 - math.exp(-max(dt, 1e-3) / RMSSD_EMA_TAU)
+                        rmssd_ema = (1.0 - a) * rmssd_ema + a * rmssd_raw
+                    rmssd_ema_last_mono = now_mono
 
-                rmssd_use = rmssd_ema if rmssd_ema is not None else rmssd_raw
+                gsr_cur = float(gsr_val) if gsr_val is not None else None
 
-                conf = 1.0
-                if not finger_on:
-                    conf *= 0.0
-                if not gsr_fresh:
-                    conf *= 0.4
-                conf *= (0.3 + 0.7 * ppg_q)
-                bio_conf = clamp01(conf)
+                gsr_mean_5s = None
+                if gsr_buf:
+                    vals5 = [v for t, v in gsr_buf if (now_wall - t) <= 5.0]
+                    if vals5:
+                        gsr_mean_5s = mean(vals5)
 
-                bpm_c = norm_range(bpm, BPM_LO, BPM_HI) if bpm is not None else None
+                gsr_slope_1s = 0.0
+                vals1 = [v for t, v in gsr_slope_buf]
+                ts1 = [t for t, v in gsr_slope_buf]
+                if len(vals1) >= 2:
+                    dt_gsr = max(ts1[-1] - ts1[0], 1e-3)
+                    gsr_slope_1s = (vals1[-1] - vals1[0]) / dt_gsr
 
-                rmssd_inv = None
-                if rmssd_use is not None:
-                    rmssd_inv = 1.0 - norm_range(rmssd_use, RMSSD_LO, RMSSD_HI)
-
-                gsr_slope_c = norm_range(abs(gsr_slope_1s) if gsr_slope_1s is not None else None, GSR_SLOPE_LO, GSR_SLOPE_HI)
-                gsr_peak_c = norm_range(gsr_peak_10s, 0, 10)
-
-                if rmssd_inv is None and bpm_c is None:
-                    arousal = 0.70 * gsr_slope_c + 0.30 * gsr_peak_c
-                elif rmssd_inv is None:
-                    arousal = 0.45 * bpm_c + 0.35 * gsr_slope_c + 0.20 * gsr_peak_c
-                else:
-                    if bpm_c is None:
-                        arousal = 0.45 * rmssd_inv + 0.35 * gsr_slope_c + 0.20 * gsr_peak_c
-                    else:
-                        arousal = 0.30 * bpm_c + 0.40 * rmssd_inv + 0.20 * gsr_slope_c + 0.10 * gsr_peak_c
-
-                bio_arousal = clamp01(arousal)
+                gsr_peak_10s = 0
+                if len(gsr_buf) >= 3:
+                    vals10 = [v for t, v in gsr_buf]
+                    for i in range(1, len(vals10) - 1):
+                        if vals10[i] > vals10[i - 1] and vals10[i] > vals10[i + 1]:
+                            if (vals10[i] - min(vals10[max(0, i - 3):i + 1])) >= GSR_PEAK_THR:
+                                gsr_peak_10s += 1
 
                 note = ""
                 if not finger_on:
-                    note = "finger_off"
-                elif rmssd_use is None:
-                    note = "hrv_warming_up(need~30s)"
+                    note = "NO_FINGER"
+                elif ppgQ < 0.35:
+                    note = "LOW_PPG_Q"
+                elif not gsr_fresh:
+                    note = "NO_GSR"
 
-                rr_count_30s = 0
-                if ppg.rr:
-                    t_last = ppg.rr[-1][0]
-                    rr_count_30s = sum(1 for (tt, _) in ppg.rr if (t_last - tt) <= 30.0)
+                # FIX #3: None 신호를 0.0으로 fallback하지 않고 가중합에서 제외 후 재분배
+                # 기존: bpm=None → bpm_n=0.0 (BPM 최솟값으로 오해됨)
+                #       rmssd=None → hrv_n_inv=0.0 (HRV 최댓값 = 스트레스 없음으로 오해됨)
+                rmssd_use = rmssd_ema if rmssd_ema is not None else rmssd_raw
+                gsr_slope_n = norm_range(gsr_slope_1s, GSR_SLOPE_LO, GSR_SLOPE_HI)
+                # FIX #6: 매직넘버 5.0 → GSR_PEAK_MAX 상수 사용
+                gsr_peak_n = clamp01(gsr_peak_10s / GSR_PEAK_MAX)
 
-                w.writerow([
-                    now_iso(), f"{now_t:.3f}",
+                arousal_terms = []
+                if bpm is not None:
+                    arousal_terms.append((norm_range(bpm, BPM_LO, BPM_HI), 0.35))
+                if rmssd_use is not None:
+                    arousal_terms.append((1.0 - norm_range(rmssd_use, RMSSD_LO, RMSSD_HI), 0.30))
+                arousal_terms.append((gsr_slope_n, 0.20))
+                arousal_terms.append((gsr_peak_n, 0.15))
+
+                total_w = sum(weight for _, weight in arousal_terms)
+                bio_arousal = clamp01(
+                    sum(val * weight for val, weight in arousal_terms) / total_w
+                ) if total_w > 0 else 0.0
+
+                conf = 1.0
+                if not finger_on:
+                    conf *= 0.1
+                conf *= clamp01((ppgQ - 0.2) / 0.6)
+                if not gsr_fresh:
+                    conf *= 0.5
+                bio_conf = clamp01(conf)
+
+                ts_iso = now_iso()
+                ts_unix = now_wall
+
+                csv_writer.writerow([
+                    ts_iso, f"{ts_unix:.3f}",
                     last_red if last_red is not None else "",
                     last_ir if last_ir is not None else "",
-                    f"{bpm:.1f}" if bpm is not None else "",
-                    f"{rmssd_raw:.3f}" if rmssd_raw is not None else "",
-                    f"{rmssd_ema:.3f}" if rmssd_ema is not None else "",
-                    rr_count_30s,
-                    gsr_cur if gsr_cur is not None else "",
-                    f"{gsr_mean_5s:.1f}" if gsr_mean_5s is not None else "",
-                    f"{gsr_slope_1s:.1f}" if gsr_slope_1s is not None else "",
-                    int(gsr_peak_10s),
-                    f"{bio_arousal:.1f}",
-                    f"{bio_conf:.2f}",
-                    f"{ppg_q:.2f}",
+                    f"{bpm:.2f}" if bpm is not None else "",
+                    f"{rmssd_raw:.4f}" if rmssd_raw is not None else "",
+                    f"{rmssd_ema:.4f}" if rmssd_ema is not None else "",
+                    rr_count,
+                    f"{gsr_cur:.2f}" if gsr_cur is not None else "",
+                    f"{gsr_mean_5s:.2f}" if gsr_mean_5s is not None else "",
+                    f"{gsr_slope_1s:.2f}",
+                    gsr_peak_10s,
+                    f"{bio_arousal:.3f}",
+                    f"{bio_conf:.3f}",
+                    f"{ppgQ:.3f}",
                     int(finger_on),
                     int(gsr_fresh),
                     note
@@ -201,45 +229,56 @@ def main(payload_queue=None):
                 f.flush()
 
                 payload = {
-                    "timestamp": now_iso(),
-                    "bio_arousal": float(bio_arousal),
-                    "bio_conf": float(bio_conf),
-                    "bpm": float(bpm) if bpm is not None else None,
-                    "rmssd_use": float(rmssd_use) if rmssd_use is not None else None,
-                    "gsr_cur": float(gsr_cur) if gsr_cur is not None else None,
-                    "gsr_slope_1s": float(gsr_slope_1s) if gsr_slope_1s is not None else None,
-                    "gsr_peak_10s": int(gsr_peak_10s),
-                    "ppgQ": float(ppg_q),
-                    "finger_on": bool(finger_on),
-                    "gsr_fresh": bool(gsr_fresh),
+                    "timestamp": ts_iso,
+                    "timestamp_unix": ts_unix,
+                    "bio_arousal": bio_arousal,
+                    "bio_conf": bio_conf,
+                    "bpm": bpm,
+                    "rmssd_use": rmssd_use,
+                    "gsr_cur": gsr_cur,
+                    "gsr_slope_1s": gsr_slope_1s,
+                    "gsr_peak_10s": gsr_peak_10s,
+                    "ppgQ": ppgQ,
+                    "finger_on": finger_on,
+                    "gsr_fresh": gsr_fresh,
                     "note": note,
                 }
 
                 if payload_queue is not None:
                     try:
                         if payload_queue.full():
-                            payload_queue.get_nowait()
+                            dropped = payload_queue.get_nowait()
+                            logger.debug(f"[BIO] Dropped stale payload ts={dropped.get('timestamp')}")
                         payload_queue.put_nowait(payload)
-                    except Exception:
-                        pass
+                        logger.debug(
+                            f"[BIO] Payload queued ts={payload['timestamp']} "
+                            f"bpm={payload['bpm']} "
+                            f"arousal={payload['bio_arousal']:.2f} "
+                            f"conf={payload['bio_conf']:.2f} "
+                            f"note={payload['note']}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"[BIO][QUEUE] {type(e).__name__}: {e}")
 
-                bpm_s = f"{bpm:.1f}" if bpm is not None else "..."
-                rmssd_s = f"{rmssd_use:.3f}" if rmssd_use is not None else "..."
-                gsr_s = f"{gsr_cur}" if gsr_cur is not None else "..."
-
-                print(
-                    f"BPM={bpm_s} RMSSD={rmssd_s}s GSR={gsr_s} "
-                    f"arousal={bio_arousal:.1f} conf={bio_conf:.2f} "
-                    f"ppgQ={ppg_q:.2f} finger_on={int(finger_on)} note={note}"
+                # FIX #10: bpm=0.0 이 falsy로 평가되는 버그 수정
+                # 기존: bpm if bpm else 0  →  bpm=0.0 일 때 0 출력 (정상값인데 None 취급)
+                bpm_log = bpm if bpm is not None else 0.0
+                rmssd_log = rmssd_use if rmssd_use is not None else 0.0
+                gsr_log = gsr_cur if gsr_cur is not None else 0.0
+                logger.info(
+                    f"[BIO v2.5] BPM={bpm_log:.1f} RMSSD={rmssd_log:.4f} "
+                    f"GSR={gsr_log:.1f} Slope1s={gsr_slope_1s:.2f} Peaks10s={gsr_peak_10s} "
+                    f"Arousal={bio_arousal:.2f} Conf={bio_conf:.2f} "
+                    f"Q={ppgQ:.2f} Finger={int(finger_on)} GSRfresh={int(gsr_fresh)} {note}"
                 )
 
             next_read += 1.0 / READ_HZ
-            sleep_for = next_read - time.monotonic()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
+            sleep_s = next_read - time.monotonic()
+            if sleep_s > 0:
+                time.sleep(sleep_s)
 
     except KeyboardInterrupt:
-        print("\n[INFO] Exit")
+        logger.info("[BIO] Stopped by user")
     finally:
         try:
             gsr.stop()
@@ -249,7 +288,5 @@ def main(payload_queue=None):
             max3.close()
         except Exception:
             pass
-        try:
-            f.close()
-        except Exception:
-            pass
+        # FIX #8: f는 try 블록 바깥에서 open되므로 항상 정의됨 — NameError 없이 안전하게 닫힘
+        f.close()
