@@ -1,7 +1,7 @@
 # sensor_interface.py
 from abc import ABC, abstractmethod
 from typing import Optional
-from sensor_types import SensorResult
+from .sensor_types import SensorResult
 
 
 class SensorSource(ABC):

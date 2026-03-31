@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from typing import Optional 
-from fer_types import FerResult
+from typing import Optional
+from .fer_types import FerResult
 
 
 class FerSource(ABC):

@@ -1,40 +1,26 @@
 # real_sensor_source.py
+import time
 from typing import Dict, Optional
 
-from sensor_interface import SensorSource
-from sensor_types import SensorResult
+from .sensor_interface import SensorSource
+from .sensor_types import SensorResult
 
 
 class RealSensorSource(SensorSource):
-    """
-    찬희(BIO)가 update_window()로 payload를 넘겨주면
-    SensorResult로 변환해서 멀티모달 엔진에 전달.
-
-    찬희 payload 포맷:
-    {
-        "timestamp": "...",
-        "bio_arousal": 0.7,   ← 스트레스 지수 (0~1)
-        "bio_conf": 0.9,      ← 신뢰도
-        "bpm": 88.0,          ← 심박수
-        "rmssd_use": 0.05,    ← HRV
-        "gsr_cur": 150.0,     ← 피부전도도
-        ...
-    }
-    """
-
     def __init__(self) -> None:
         self._latest: Optional[SensorResult] = None
 
     def update_window(self, payload: Dict) -> None:
-        """찬희가 호출해주는 함수 - payload 받아서 SensorResult로 변환"""
+        # 1. BIO 코어에서 계산한 스트레스 수치
+        raw_stress = float(payload.get("bio_arousal", 0.0))
 
-        # bio_arousal → stressed 로 매핑 (0~1 스트레스 지수)
-        bio_arousal = float(payload.get("bio_arousal", 0.0))
-        bio_conf    = float(payload.get("bio_conf", 1.0))
+        # 2. 센서 접촉 신뢰도 (손가락이 잘 붙어있는가?)
+        bio_conf = float(payload.get("bio_conf", 1.0))
 
-        # 신뢰도 낮으면 스트레스 점수 낮춤
-        stressed = bio_arousal * bio_conf
-        safe     = 1.0 - stressed
+        # 3. 신뢰도가 낮으면 0.5(판단 보류)로 수렴
+        #    신뢰도 1.0 → raw_stress 그대로 / 신뢰도 0.0 → 중립(0.5)
+        stressed = (raw_stress * bio_conf) + (0.5 * (1.0 - bio_conf))
+        safe = ((1.0 - raw_stress) * bio_conf) + (0.5 * (1.0 - bio_conf))
 
         raw_metrics: Dict[str, float] = {
             "bpm": float(payload.get("bpm") or 0.0),
@@ -43,53 +29,17 @@ class RealSensorSource(SensorSource):
         }
 
         emotion_scores: Dict[str, float] = {
-            "safe":     round(safe, 4),
+            "safe": round(safe, 4),
             "stressed": round(stressed, 4),
         }
 
+        obs_time = float(payload.get("timestamp_unix", time.time()))
         self._latest = SensorResult(
+            timestamp=obs_time,
             raw_metrics=raw_metrics,
             emotion_scores=emotion_scores,
+            bio_conf=bio_conf,  # [QUALITY #3 연동] confidence 보정을 위해 저장
         )
 
     def get_latest_result(self) -> Optional[SensorResult]:
         return self._latest
-
-
-# =========================================================
-# 단위 테스트
-# =========================================================
-if __name__ == "__main__":
-    print("[단위 테스트 시작] RealSensorSource 찬희 payload 변환 검증")
-
-    sensor_src = RealSensorSource()
-
-    # 찬희가 보내주는 가짜 payload
-    dummy_payload = {
-        "timestamp": "2026-03-22 15:00:00",
-        "bio_arousal": 0.8,
-        "bio_conf": 0.9,
-        "bpm": 95.0,
-        "rmssd_use": 0.04,
-        "gsr_cur": 200.0,
-        "ppgQ": 0.85,
-        "finger_on": True,
-        "gsr_fresh": True,
-        "note": "",
-    }
-
-    sensor_src.update_window(dummy_payload)
-    result = sensor_src.get_latest_result()
-
-    if result:
-        print(f"\n[변환 결과]")
-        print(f"  raw_metrics   : {result.raw_metrics}")
-        print(f"  emotion_scores: {result.emotion_scores}")
-
-        stressed = result.emotion_scores.get("stressed", 0)
-        if stressed > 0:
-            print("\n결과: PASS (찬희 payload 정상 변환!)")
-        else:
-            print("\n결과: FAIL")
-    else:
-        print("\n결과: FAIL (데이터 없음)")

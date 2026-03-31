@@ -10,5 +10,6 @@ class FerResult:
     - emotion_scores: Angry / Sad / Happy / Neutral 확률
     - drowsy_scores : Alert / Drowsy 확률
     """
+    timestamp: float
     emotion_scores: Dict[str, float]
     drowsy_scores: Dict[str, float]
