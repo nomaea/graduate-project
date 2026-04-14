@@ -14,6 +14,8 @@ class FERPacket:
     source: str = "fer"
     face_detected: Optional[bool] = None
     latency_ms: Optional[float] = None
+    ear: Optional[float] = None        # 양안 평균 Eye Aspect Ratio
+    is_drowsy: Optional[bool] = None   # EAR 기반 졸음 여부 (2초 이상 눈 감음)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
