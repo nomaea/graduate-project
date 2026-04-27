@@ -18,6 +18,14 @@ except ImportError:
 LABELS = ["neutral", "happy", "sad", "angry"]
 IMG_SIZE = 224
 
+# EAR 기반 졸음 감지 설정
+EAR_CLOSE_THRESHOLD = 0.20   # 이 값 미만이면 눈 감은 것으로 판정
+EAR_DROWSY_SECONDS  = 2.0    # 연속 눈 감음 유지 시간 임계값 (초)
+
+# MediaPipe FaceMesh 눈 랜드마크 인덱스 (p1~p6, 시계 방향)
+_LEFT_EYE_IDX  = [362, 385, 387, 263, 373, 380]
+_RIGHT_EYE_IDX = [33,  160, 158, 133, 153, 144]
+
 MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -28,6 +36,24 @@ PROB_EMA = 0.4
 NO_FACE_RESET_FRAMES = 5
 
 _logger = logging.getLogger(__name__)
+
+
+def _euclidean(p1, p2) -> float:
+    return float(np.linalg.norm(p1 - p2))
+
+
+def compute_ear(landmarks, indices: list, frame_w: int, frame_h: int) -> float:
+    """EAR = (||p2-p6|| + ||p3-p5||) / (2 * ||p1-p4||)"""
+    pts = np.array(
+        [[landmarks[i].x * frame_w, landmarks[i].y * frame_h] for i in indices],
+        dtype=np.float32,
+    )
+    vertical_1 = _euclidean(pts[1], pts[5])
+    vertical_2 = _euclidean(pts[2], pts[4])
+    horizontal = _euclidean(pts[0], pts[3])
+    if horizontal < 1e-6:
+        return 0.0
+    return (vertical_1 + vertical_2) / (2.0 * horizontal)
 
 
 def softmax(x: np.ndarray) -> np.ndarray:
@@ -147,6 +173,10 @@ class FERCore:
         self.prob_ema = None
         self._no_face_count = 0  # [FER#2] 연속 얼굴 미감지 프레임 카운터
 
+        # EAR 기반 졸음 상태 추적
+        self._eye_closed_since: Optional[float] = None  # 눈 감기 시작 시각 (time.time())
+        self._is_drowsy: bool = False
+
         self.interpreter = Interpreter(model_path=tflite_path)
         self.interpreter.allocate_tensors()
         self.input_details  = self.interpreter.get_input_details()[0]
@@ -170,10 +200,28 @@ class FERCore:
         probs_out    = None
         face_detected = False
         roi_preview  = None
+        ear_value: Optional[float] = None
 
         if results.multi_face_landmarks:
             face_landmarks = results.multi_face_landmarks[0]
-            aligned_roi    = get_mesh_aligned_roi(frame_bgr, face_landmarks, scale=1.45)
+
+            # EAR 계산 및 졸음 상태 갱신
+            fh, fw = frame_bgr.shape[:2]
+            lm = face_landmarks.landmark
+            left_ear  = compute_ear(lm, _LEFT_EYE_IDX,  fw, fh)
+            right_ear = compute_ear(lm, _RIGHT_EYE_IDX, fw, fh)
+            ear_value = (left_ear + right_ear) / 2.0
+
+            if ear_value < EAR_CLOSE_THRESHOLD:
+                if self._eye_closed_since is None:
+                    self._eye_closed_since = frame_ts
+                elif (frame_ts - self._eye_closed_since) >= EAR_DROWSY_SECONDS:
+                    self._is_drowsy = True
+            else:
+                self._eye_closed_since = None
+                self._is_drowsy = False
+
+            aligned_roi = get_mesh_aligned_roi(frame_bgr, face_landmarks, scale=1.45)
 
             if aligned_roi is not None and aligned_roi.size > 0:
                 face_detected        = True
@@ -205,6 +253,9 @@ class FERCore:
                     "[FER] No face for %d frames — resetting prob_ema", self._no_face_count
                 )
                 self.prob_ema = None
+            if self._no_face_count >= NO_FACE_RESET_FRAMES:
+                self._eye_closed_since = None
+                self._is_drowsy = False
 
             # [FER#5] 항상 dict 반환으로 통일 (None 반환 제거)
             return {"packet": None, "roi_preview": None, "face_detected": False}
@@ -222,6 +273,8 @@ class FERCore:
             argmax_label=argmax_label,
             face_detected=face_detected,
             latency_ms=float(latency_ms),
+            ear=float(ear_value) if ear_value is not None else None,
+            is_drowsy=self._is_drowsy,
         )
         self.seq += 1
 

@@ -1,3 +1,4 @@
+import time
 from typing import Optional, Dict
 from queue import Queue, Empty
 
@@ -30,17 +31,17 @@ class RealFerSource(FerSource):
             for i, label in enumerate(LABEL_ORDER)
         }
 
-        # [MUL#1] + [FER#7] 얼굴 유무로 drowsy를 판단하는 잘못된 로직 제거.
-        # - face_detected=True  → alert=1.0 은 실제 졸음이 없음을 보장하지 않음
-        # - face_detected=False → drowsy=1.0 은 고개 돌림/조명 부족도 DANGER 유발
-        # 실제 EAR(Eye Aspect Ratio) 기반 졸음 감지 구현 전까지 중립값(0.5/0.5) 고정.
-        # 기본값도 False로 수정 [FER#7]: 얼굴 없는 상황을 "있는 것"으로 오판 방지.
-        drowsy_scores: Dict[str, float] = {"alert": 0.5, "drowsy": 0.5}
+        face_detected = packet.get("face_detected", True)
+        drowsy_scores: Dict[str, float] = {
+          "alert": packet.get("alert", 1.0 if face_detected else 0.0),
+          "drowsy": packet.get("drowsy", 0.0), # <--- 1. 독립적인 졸음 수치
+          "face_missing": 0.0 if face_detected else 1.0 # <--- 2. 얼굴 부재 상태 신설
+        }
 
-        ts = float(packet.get("ts", 0.0))  # [MUL#5] 관측 시점 전달
 
+        obs_time = float(packet.get("ts", time.time()))
         return FerResult(
+            timestamp=obs_time,
             emotion_scores=emotion_scores,
             drowsy_scores=drowsy_scores,
-            ts=ts,
         )
