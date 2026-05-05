@@ -1,0 +1,15 @@
+# Internal docs
+CHANGES.md
+CLAUDE.md
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+logs/
+
+# Temp metrics
+/tmp/fer_main_metrics.json
+/tmp/fer_camera_metrics.json
