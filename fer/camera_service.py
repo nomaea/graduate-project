@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import argparse
+import json
+import signal
 import socket
 import struct
 import time
@@ -26,6 +28,12 @@ def main():
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--jpeg_quality", type=int, default=85)
     args = parser.parse_args()
+
+    def _sigterm(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _sigterm)
+
+    session_start = time.time()
 
     print("[camera_service] init Picamera2")
     picam2 = Picamera2()
@@ -92,6 +100,20 @@ def main():
             picam2.stop()
         except Exception:
             pass
+
+        session_duration = time.time() - session_start
+        fps = frame_count / session_duration if session_duration > 0 else 0.0
+        metrics = {
+            "frame_count":        frame_count,
+            "session_duration_s": round(session_duration, 2),
+            "avg_fps":            round(fps, 2),
+        }
+        try:
+            with open("/tmp/fer_camera_metrics.json", "w") as f:
+                json.dump(metrics, f)
+            print(f"[camera_service] 세션 메트릭 저장 완료: {metrics}")
+        except Exception as e:
+            print(f"[camera_service] 메트릭 저장 실패: {e}")
 
 
 if __name__ == "__main__":

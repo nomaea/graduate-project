@@ -172,6 +172,7 @@ class FERCore:
         self.seq = 0
         self.prob_ema = None
         self._no_face_count = 0  # [FER#2] 연속 얼굴 미감지 프레임 카운터
+        self._latency_samples: list = []
 
         # EAR 기반 졸음 상태 추적
         self._eye_closed_since: Optional[float] = None  # 눈 감기 시작 시각 (time.time())
@@ -263,6 +264,7 @@ class FERCore:
         argmax_idx   = int(np.argmax(probs_out))
         argmax_label = LABELS[argmax_idx]
         latency_ms   = (time.time() - frame_ts) * 1000.0
+        self._latency_samples.append(latency_ms)
 
         packet = FERPacket(
             ts=frame_ts,  # [FER#6] time.time() 기반
@@ -287,6 +289,21 @@ class FERCore:
         if return_debug:
             return {"packet": packet_dict, "roi_preview": roi_preview, "face_detected": face_detected}
         return {"packet": packet_dict, "roi_preview": None, "face_detected": face_detected}
+
+    def get_metrics(self) -> dict:
+        samples = self._latency_samples
+        if samples:
+            avg_lat = sum(samples) / len(samples)
+            min_lat = min(samples)
+            max_lat = max(samples)
+        else:
+            avg_lat = min_lat = max_lat = 0.0
+        return {
+            "fer_frame_count": self.seq,
+            "avg_latency_ms": round(avg_lat, 2),
+            "min_latency_ms": round(min_lat, 2),
+            "max_latency_ms": round(max_lat, 2),
+        }
 
     def close(self):
         self.face_mesh.close()

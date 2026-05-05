@@ -32,10 +32,11 @@ class RealFerSource(FerSource):
         }
 
         face_detected = packet.get("face_detected", True)
+        is_drowsy = bool(packet.get("is_drowsy", False))
         drowsy_scores: Dict[str, float] = {
-          "alert": packet.get("alert", 1.0 if face_detected else 0.0),
-          "drowsy": packet.get("drowsy", 0.0), # <--- 1. 독립적인 졸음 수치
-          "face_missing": 0.0 if face_detected else 1.0 # <--- 2. 얼굴 부재 상태 신설
+            "alert": 0.0 if is_drowsy else (1.0 if face_detected else 0.0),
+            "drowsy": 1.0 if is_drowsy else 0.0,
+            "face_missing": 0.0 if face_detected else 1.0,
         }
 
 
